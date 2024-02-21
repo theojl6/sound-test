@@ -1,8 +1,11 @@
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::SeekFrom;
+use std::mem::MaybeUninit;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::FromSample;
+use cpal::Sample;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -33,25 +36,49 @@ fn main() -> std::io::Result<()> {
         .supported_input_configs()
         .expect("error while querying configs");
 
-    let supported_config = supported_configs_range
+    let config = supported_configs_range
         .next()
         .expect("no suported config?!")
         .with_sample_rate(cpal::SampleRate(SAMPLERATE));
 
-    let audio_data = Arc::new(Mutex::new(Vec::<i16>::new()));
+    let audio_data = Arc::new(Mutex::new(Vec::new()));
 
     let cloned_data = Arc::clone(&audio_data);
 
-    let stream = device
-        .build_input_stream(
-            &supported_config.into(),
-            move |data: &[i16], info: &cpal::InputCallbackInfo| {
-                cloned_data.lock().unwrap().extend_from_slice(data);
-            },
-            move |err| {},
+    let err_fn = move |err| {
+        eprintln!("an error occurred on stream: {}", err);
+    };
+
+    let stream = match config.sample_format() {
+        cpal::SampleFormat::I8 => device.build_input_stream(
+            &config.into(),
+            move |data, _: &_| write_input_data::<i8, i8>(data, cloned_data),
+            err_fn,
             None,
-        )
-        .expect("cannot build the stream");
+        ),
+        cpal::SampleFormat::I16 => device.build_input_stream(
+            &config.into(),
+            move |data, _: &_| write_input_data::<i16, i16>(data, cloned_data),
+            err_fn,
+            None,
+        ),
+        cpal::SampleFormat::I32 => device.build_input_stream(
+            &config.into(),
+            move |data, _: &_| write_input_data::<i32, i32>(data, cloned_data),
+            err_fn,
+            None,
+        ),
+        cpal::SampleFormat::F32 => device.build_input_stream(
+            &config.into(),
+            move |data, _: &_| write_input_data::<f32, f32>(data, cloned_data),
+            err_fn,
+            None,
+        ),
+        sample_format => {
+            panic!()
+        }
+    }
+    .expect("Cannot build stream");
 
     while running.load(Ordering::SeqCst) {
         stream.play().unwrap();
@@ -114,4 +141,16 @@ fn main() -> std::io::Result<()> {
     println!("max_amplitude: {}", max_amplitude);
 
     Ok(())
+}
+
+fn write_input_data<T, U>(input: &[T], buffer: Arc<Mutex<Vec<MaybeUninit<u8>>>>)
+where
+    T: Sample,
+    U: Sample + FromSample<T>,
+{
+    let converted_input: &[MaybeUninit<u8>] = unsafe {
+        std::slice::from_raw_parts(input.as_ptr() as *const MaybeUninit<u8>, input.len())
+    };
+
+    buffer.lock().unwrap().extend_from_slice(converted_input);
 }
